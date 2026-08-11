@@ -1,0 +1,128 @@
+================================================================================
+   HYBRID TWO-STAGE RECOMMENDATION PIPELINE (OFFLINE COMPUTATION + ONLINE RE-RANK)
+                   (Based on dataset_ai_แนำนำคำอธิบายสินค้า.xlsx)
+================================================================================
+
+[ภาพรวมสถาปัตยกรรม (Architecture Overview)]
+ระบบแนะนำสินค้าแบบไฮบริด แบ่งการทำงานเป็น 2 ส่วนหลักเพื่อความรวดเร็วและแม่นยำ:
+1. Stage 1 (Offline/Nearline): คำนวณความสัมพันธ์ซับซ้อนล่วงหน้าหลังบ้าน (Background Process) 
+   เพื่อไม่ให้ระบบช้าขณะผู้ใช้งานกำลังเปิดแอปพลิเคชัน
+2. Stage 2 (Online Real-Time Serving): ดึงผลลัพธ์ที่คำนวณไว้มาปรับลำดับใหม่ทันที (Re-ranking) 
+   โดยอิงจากพฤติกรรมล่าสุดของผู้ใช้ ณ วินาทีนั้น (เช่น คำค้นหาล่าสุด)
+
+================================================================================
+STAGE 1: BACKGROUND PROCESS (การประมวลผลล่วงหน้าหลังบ้าน)
+================================================================================
+- ลักษณะการทำงาน: รันเป็นรอบตามเวลาที่กำหนด (เช่น ทุกเที่ยงคืน หรือทุก 1-2 ชั่วโมง)
+- ข้อมูลที่ใช้: ประวัติโปรไฟล์ผู้ใช้ (`03_Buyer_Profile`) และประวัติพฤติกรรม (`04_Buyer_Behavior`)
+
+[STEP 1.1: IMPLICIT RATING MATRIX COMPUTATION]
+- คำอธิบาย: แปลงพฤติกรรมต่างๆ ของผู้ใช้เป็นคะแนนความสนใจ (Implicit Weight Score)
+  * สั่งซื้อ (Purchase) = 5.0 คะแนน | กดถูกใจ (Favorite) = 4.0 คะแนน
+  * เพิ่มในรายการโปรด (Wishlist) = 3.0 คะแนน | คลิกดู (Click) = 2.0 คะแนน | เข้าชม (View) = 1.0 คะแนน
+
+[STEP 1.2: HEAVY COLLABORATIVE FILTERING (ALS / SVD)]
+- คำอธิบาย: คำนวณความสัมพันธ์เชิงลึกระหว่างผู้ใช้ที่มีรสนิยมคล้ายกัน และคัดเลือกสินค้าแนะนำตั้งต้น 100 รายการต่อผู้ใช้
+- กรณีผู้ใช้ใหม่ (Cold Start - BR006): หากไม่มีประวัติพฤติกรรม จะสลับไปดึงสินค้าติดเทรนด์และยอดนิยม (Popularity & Trending Score) มาแนะนำแทนโดยอัตโนมัติ
+
+[STEP 1.3: PRE-COMPUTED CACHING]
+- คำอธิบาย: นำรายการสินค้าแนะนำ 100 รายการที่คำนวณเสร็จแล้ว ไปบันทึกเก็บไว้ในระบบดึงข้อมูลด่วน (Redis Cache) เพื่อเตรียมพร้อมใช้งาน
+
+================================================================================
+STAGE 2: ONLINE REAL-TIME SERVING & RE-RANKING (การประมวลผลหน้าร้านแบบเรียลไทม์)
+================================================================================
+- ลักษณะการทำงาน: ทำงานทันทีเมื่อผู้ใช้เปิดหน้าแอปพลิเคชัน หรือมีการค้นหา/คลิกสินค้า
+- ข้อมูลที่ใช้: Buyer_ID + พฤติกรรมในเซสชันปัจจุบัน (คำค้นหาล่าสุด `Recent_Search`, สินค้าที่เพิ่งดู `Recent_Click`)
+
+[STEP 2.1: FAST RETRIEVAL FROM REDIS CACHE]
+- คำอธิบาย: ดึงรายการสินค้าแนะนำ 100 รายการที่เตรียมไว้จาก Stage 1 ออกมาจาก Redis Cache (ใช้เวลาไม่ถึง 5 มิลลิวินาที)
+
+[STEP 2.2: REAL-TIME CONTEXTUAL CANDIDATE INJECTION]
+- คำอธิบาย: ดึงอารมณ์/ความสนใจปัจจุบันของผู้ใช้มาผสม
+  * หากมีการพิมพ์ค้นหา (`Recent_Search`) หรือกดดูสินค้า (`Recent_Click`) ในขณะนั้น 
+  * ระบบจะแปลงข้อความค้นหาเป็น Vector (รองรับคำสะกดผิด/สแลง) เพื่อค้นหาสินค้าที่เกี่ยวข้องเพิ่มเติม 20 รายการ นำมาจับคู่รวมกับสินค้าตั้งต้น
+
+[STEP 2.3: MULTI-FACTOR REAL-TIME RE-RANKING ENGINE]
+- คำอธิบาย: คำนวณคะแนนรวม `Recommendation_Score` เพื่อจัดลำดับสินค้าใหม่
+  * สูตรคะแนน: Score = w1*(CF_Score) + w2*(Embedding_Sim) + w3*(Category_Sim) + w4*(Brand_Sim) + w5*(Price_Sim)
+  * กฎการถ่วงน้ำหนัก (BR005): สินค้าที่เพิ่งกดดู/ค้นหาล่าสุด จะได้รับน้ำหนักความสำคัญมากกว่าประวัติเก่า
+
+[STEP 2.4: BUSINESS RULES & GUARDRAIL FILTERING]
+- คำอธิบาย: กรองสินค้าที่ไม่ตรงตามเงื่อนไขออกก่อนแสดงผล
+  * BR002 - BR004: กรองสินค้าที่ขายแล้ว (Sold), สินค้าที่ถูกลบ (Deleted) หรือปิดการขาย (Inactive) ออกทันที
+  * BR008: คัดกรองข้อมูลส่วนบุคคล (PDPA Protection - ไม่แสดง PII)
+  * กรองช่วงราคาให้ตรงกับงบของผู้ใช้ (`Preferred_Price_Range`) และคัดเฉพาะร้านที่มีคะแนนดี (`Seller_Rating`)
+
+[STEP 2.5: RESPONSE GENERATION & ASYNC FEEDBACK LOGGING]
+- คำอธิบาย: ส่งรายการสินค้าแนะนำพร้อมเหตุผล (เช่น "แนะนำจากคำค้นหาล่าสุดของคุณ", "สินค้ายอดนิยมสำหรับคุณ") 
+  และบันทึก Feedback การปฏิสัมพันธ์ลงตาราง `07_Recommendation_Feedback` เพื่อนำไปเทรนโมเดลปรับจูนน้ำหนักในรอบถัดไป
+
+
+
+================================================================================
+           RECOMMENDATION ENGINE ARCHITECTURE, MODELS & FILTERS
+                 (Based on dataset_ai_แนะนำคำอธิบายสินค้า.xlsx)
+================================================================================
+
+[SYSTEM OVERVIEW]
+- Architecture Type: Two-Stage Hybrid (Offline Heavy Batch + Online Real-Time Serving)
+- Total Machine Learning Models: 4 Models
+- Total Data Processing Filters: 14 Filters (4 Background + 10 Real-Time)
+- Target Standard: 100% Compliance with Business Rules (BR001-BR009) and Metrics (Precision@5, Recall@5, CTR, MAP)
+
+================================================================================
+1. LIST OF MACHINE LEARNING MODELS (4 MODELS)
+================================================================================
+1. Matrix Factorization Model (ALS / SVD)
+   - Function: Calculates deep user-item latent vector relationships for Collaborative Filtering in Stage 1.
+2. sBERT / CLIP Text Transformer
+   - Function: Tokenizes and extracts semantic embeddings from Search_History and Recent_Search (Robust to Thai/English typos and slang).
+3. FAISS / Milvus Vector Search Engine
+   - Function: Performs sub-millisecond similarity vector search for real-time intent candidate retrieval.
+4. Learnable Re-ranking Model (Logistic Regression / LightGBM)
+   - Function: Auto-tunes feature weights (w1-w5) based on user interaction feedback to rank final items.
+
+================================================================================
+2. LIST OF FILTERS BY STAGE (14 FILTERS)
+================================================================================
+
+--- STAGE 1: OFFLINE / BACKGROUND PROCESS (4 FILTERS) ---
+Filter 1 : Implicit Rating Filter
+           - Converts user actions (View=1, Click=2, Wishlist=3, Favorite=4, Purchase=5) into implicit numerical ratings.
+Filter 2 : Collaborative Filtering Candidates Filter
+           - Generates initial top-100 candidates with highest user-item similarity scores.
+Filter 3 : Cold Start Fallback Filter (BR006)
+           - Detects new users with zero history and automatically falls back to Popularity_Score & Trending_Score.
+Filter 4 : Cache Persistence Filter
+           - Formats and writes pre-computed top-100 candidate lists into Redis Cache.
+
+--- STAGE 2: ONLINE REAL-TIME MICROSERVICE (10 FILTERS) ---
+Filter 5 : Redis Retrieval Filter
+           - Fetches pre-computed candidate lists from Redis Cache in < 5ms latency.
+Filter 6 : Text Tokenization & Normalization Filter
+           - Cleans, tokenizes, and corrects Thai/English search queries from Recent_Search.
+Filter 7 : Real-Time Intent Vector Filter
+           - Extracts semantic embedding vectors from immediate session search queries.
+Filter 8 : Vector Candidate Injection Filter
+           - Performs vector search and injects top-20 real-time intent matches into the candidate pool.
+Filter 9 : Multi-Factor Re-ranking Filter
+           - Computes final Recommendation_Score using weighted sum:
+             Score = w1*(CF_Score) + w2*(Embedding_Sim) + w3*(Category_Sim) + w4*(Brand_Sim) + w5*(Price_Sim)
+Filter 10: Recency Weight Adjustment Filter (BR005)
+           - Applies higher priority weights to Recently Viewed, Recent Search, Wishlist, and Favorites.
+Filter 11: Availability & Status Guardrail Filter (BR002 - BR004)
+           - Filters out Sold, Deleted, and Inactive products from final recommendations.
+Filter 12: PDPA Privacy Masking Filter (BR008)
+           - Masks all Personally Identifiable Information (PII) to ensure strict data privacy.
+Filter 13: Price Range & Seller Rating Filter
+           - Matches products against user's Preferred_Price_Range and enforces minimum Seller_Rating thresholds.
+Filter 14: Output Formatter & Feedback Logging Filter
+           - Formats JSON response with Recommendation_Reason and logs interactions to 07_Recommendation_Feedback.
+
+================================================================================
+3. SUMMARY
+================================================================================
+- Total ML Models : 4 Models
+- Total Filters   : 14 Filters
+- Primary Goal    : Zero latency serving, real-time intent awareness, 100% data contract compliance.
+================================================================================

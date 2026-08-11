@@ -1,0 +1,100 @@
+[ Input Image & Payload ] ──► (รูปภาพ + Metadata จาก SE Backend)
+        │
+        ▼
+[ STEP 1: Image Quality & Pre-processing ]
+  │  ├─ Resizing & Normalization Filter
+  │  ├─ Image Quality Extractor ──► คำนวณ Blur / Brightness / Contrast / Noise Score
+  │  └─ Segmentation Filter (YOLOv8-Seg)
+  │         ├─ Object Frame ──────► สกัดภาพตัวสินค้า (Foreground)
+  │         └─ Background Frame ──► สกัดภาพฉากหลัง (Background)
+  │
+  ▼
+[ STEP 2: Artifact & Object/Brand Identification ]
+  │  ├─ Artifact Classifier ─────► ตรวจจับ Screenshot / Watermark / AI Image / Stock Image
+  │  ├─ Object/Brand Extractor ──► สกัด Object_Detected และ Brand จากภาพ
+  │  └─ Category Classifier ────────► จำแนกหมวดหมู่สินค้า 5 หมวดหลัก
+  │
+  ▼
+[ STEP 3: Multi-Vector Feature Extraction & Hashes ]
+  │  ├─ Hash Extractor ───────────► คำนวณ Image_Hash และ Perceptual_Hash
+  │  ├─ Foreground Vector ────────► สกัด Embedding Vector ตัวสินค้าด้วย CLIP / ViT
+  │  └─ Background Vector ──► สกัด Embedding Vector ฉากหลัง
+  │
+  ▼
+[ STEP 4: Multi-Factor Distance & Context Matching ]
+  │  ├─ คำนวณ Embedding_Similarity (เฉพาะตัวสินค้า)
+  │  ├─ คำนวณ Background_Similarity (เฉพาะฉากหลัง)
+  │  └─ Context Matcher ────► เช็ก Metadata_Match, Seller_Match, Upload_Time_Difference_Min
+  │
+  ▼
+[ STEP 5: Weighted Scoring & Scenario Decision Logic ]
+  │  ├─ Weighted Scoring Engine ──► คำนวณ Similarity_Score จาก:
+  │  │      # กำหนด ค่าน้ำหนัก (Weights) ตามความสำคัญ
+  │  │		w1, w2, w3, w4 = 0.55, 0.25, 0.10, 0.10 (สมมุติรอจูน)
+  │  │
+  │  │		# ตัวอย่างการคำนวณคะแนนสำหรับภาพ Near-Duplicate
+  │  │		embedding_sim = 0.96   # รูปทรงสินค้าเหมือนกันมาก
+  │  │		hash_sim = 0.90        # พิกเซลใกล้เคียงกัน
+  │  │		background_sim = 0.85  # ฉากหลังคล้ายกัน
+  │  │		metadata_sim = 1.00    # เป็นผู้ขายคนเดียวกัน แบรนด์ตรงกัน
+  │  │
+  │  │		# คำนวณ Similarity_Score รวม
+  │  │		similarity_score = (w1 * embedding_sim) + (w2 * hash_sim) + (w3 * background_sim) + (w4 * metadata_sim)
+  │  │		# ผลลัพธ์: (0.55 * 0.96) + (0.25 * 0.90) + (0.10 * 0.85) + (0.10 * 1.00) = 0.938
+  │  │
+  │  ├─ Scenario Classifier ───────────► จำแนก Scenario_Type จาก 16 รูปแบบ
+  │  └─ Final Decision ────────────────► ตัดสินผลลัพธ์: DUPLICATE / UNIQUE / REVIEW / SPAM
+  │
+  ▼
+[ STEP 6: Return Complete Log & Vectors to SE ]
+     └─ ส่ง Response กลับให้ SE
+
+
+
+
+================================================================================
+ LIST OF MODELS (6 MODELS)
+================================================================================
+1. YOLOv8-Seg / FastSAM
+   - Function: Foreground Object & Background Instance Segmentation
+2. EfficientNet-B0
+   - Function: Multi-label Classification (Screenshot, Watermark, AI Image, Stock)
+3. CLIP (ViT-B/32)
+   - Function: Zero-shot Category Classification (5 Main Categories) & Brand Detection
+4. CLIP (ViT-L/14) / Swin Transformer
+   - Function: Deep Feature Extractor for Foreground Product (Embedding Vector)
+5. Light ViT / ResNet Backbone
+   - Function: Feature Extractor for Background Area (Background Embedding Vector)
+6. Logistic Regression / Linear Classification Layer
+   - Function: Learnable Weight Calibration (w1, w2, w3, w4) from Ground Truth
+
+================================================================================
+ LIST OF FILTERS BY PIPELINE STEP (19 FILTERS)
+================================================================================
+
+--- STEP 1: Pre-processing & Feature Filtering (8 Filters) ---
+Filter 1 : Resize Filter (Resizing to 224x224 / 384x384)
+Filter 2 : Color Normalization Filter (RGB Scale Standardization)
+Filter 3 : Denoising Filter (Blur & Compression Noise Reduction)
+Filter 4 : Foreground Segmentation Filter (Product Area Extraction)
+Filter 5 : Background Crop Filter (Background Area Extraction)
+Filter 6 : Artifact Classifier Filter (Screenshot, Watermark, AI, Stock Detection)
+Filter 7 : Object & Brand Classifier Filter (OCR & Visual Brand Detection)
+Filter 8 : Category Classifier Filter (5 Main Categories: Mobile/Tablet, Fashion, Camera, Beauty, IT)
+
+--- STEP 2: Multi-Vector Feature Extraction & Hashes (4 Filters) ---
+Filter 9 : Image Hash / pHash Filter (Exact 99% Duplicate Check)
+Filter 10: Foreground Spatial Feature Filter (Product Embedding Extraction)
+Filter 11: Background Spatial Feature Filter (Background Embedding Extraction)
+Filter 12: L2 Vector Normalization Filter (Unit Length Standardization)
+
+--- STEP 3: Multi-Factor Distance & Context Matching (3 Filters) ---
+Filter 13: Foreground Cosine Similarity Distance Filter
+Filter 14: Background Cosine Similarity Distance Filter
+Filter 15: Context Matcher Filter (Seller_Match, Metadata_Match, Upload_Time_Difference_Min)
+
+--- STEP 4: Decision & Scenario Classification Logic (4 Filters) ---
+Filter 16: Weighted Scoring Engine Filter (Multi-Factor Scoring Formula Calculator)
+Filter 17: Scenario Classifier Filter (16 Scenario_Types Classification)
+Filter 18: Dynamic Thresholding Filter (Category-Based Threshold Adjustment)
+Filter 19: Status Decision Mapping Filter (DUPLICATE / UNIQUE / REVIEW / SPAM)
